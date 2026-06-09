@@ -1,0 +1,33 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+ENV/
+
+# Variables de entorno (contienen tokens y claves)
+.env
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos específicos de macOS
+.DS_Store
+
+# Archivos de base de datos / datos generados
+*.db
+*.sqlite
+tickers.csv          # Contiene tus tickers personales (opcional, puedes excluirlo)
+*.log
+
+# Archivos de configuración de editores
+.vscode/
+.idea/
+*.swp
+
+# Archivos de salida de pruebas
+.pytest_cache/
+.coverage
+htmlcov/
