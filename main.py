@@ -70,11 +70,36 @@ DEFAULT_TIMEFRAME = os.getenv('TIMEFRAME', '1h')
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL_MINUTES', 5))
 
 CSV_FILE = 'tickers.csv'
+SIGNALS_FILE = 'signals_history.csv'
 
 # Para evitar múltiples alertas de una misma señal
 last_alert = {}
 
 # --------------------- Funciones del CSV ---------------------
+def init_signals_file():
+    """Inicializa el archivo de histórico de señales si no existe."""
+    if not os.path.exists(SIGNALS_FILE):
+        with open(SIGNALS_FILE, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'symbol', 'signal_type', 'price', 'momento', 'tendencia'])
+
+def save_signal(symbol, signal_type, price, momento, tendencia):
+    """Guarda una señal en el histórico CSV."""
+    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    with open(SIGNALS_FILE, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([timestamp, symbol, signal_type, price, momento, tendencia])
+
+def read_signals(limit=100):
+    """Lee las últimas señales del histórico."""
+    init_signals_file()
+    signals = []
+    with open(SIGNALS_FILE, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            signals.append(row)
+    # Retorna en orden inverso (más recientes primero) y limita
+    return list(reversed(signals))[:limit]
 def read_tickers():
     """Lee el CSV y devuelve lista de dicts con symbol, active, timeframe"""
     tickers = []
@@ -164,6 +189,7 @@ def analyze_and_alert():
                 tendencia = "BULL (Up)" if last_row['is_bullish'] else "BEAR (Down)"
                 
                 send_telegram_alert(symbol, sig_type, precio, momento, tendencia)
+                save_signal(symbol, sig_type, precio, momento, tendencia)
                 log_message(f"Alerta {sig_type} para {symbol} - Precio: {precio} (vela UTC {last_closed_ts})")
                 last_alerted_candle[symbol] = last_closed_ts
             else:
@@ -183,6 +209,11 @@ app = Flask(__name__)
 def index():
     tickers = read_tickers()
     return render_template('index.html', tickers=tickers)
+
+@app.route('/signals')
+def signals():
+    signals = read_signals(limit=200)
+    return render_template('signals.html', signals=signals)
 
 @app.route('/add', methods=['POST'])
 def add():
