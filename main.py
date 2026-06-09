@@ -2,7 +2,7 @@ import os
 import csv
 import threading
 import time
-from datetime import datetime
+import pandas as pd
 from flask import Flask, render_template, request, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -12,6 +12,38 @@ from macd_logic import detect_signals, get_last_signal
 from telegram_bot import send_telegram_alert
 
 load_dotenv()
+
+import time
+from datetime import datetime, timezone
+from data_fetcher import fetch_ohlcv, get_exchange_time
+
+# ... resto de imports ...
+
+def timeframe_to_milliseconds(timeframe: str) -> int:
+    """Convierte timeframe de Binance (ej: '1h', '15m', '4h') a milisegundos."""
+    unit = timeframe[-1]
+    value = int(timeframe[:-1])
+    if unit == 'm':
+        return value * 60 * 1000
+    elif unit == 'h':
+        return value * 60 * 60 * 1000
+    elif unit == 'd':
+        return value * 24 * 60 * 60 * 1000
+    else:
+        raise ValueError(f"Timeframe no soportado: {timeframe}")
+
+def get_last_closed_candle(df: pd.DataFrame, timeframe_ms: int, current_time_ms: int):
+    """
+    Retorna el índice (entero) de la última fila del DataFrame cuya vela está cerrada.
+    Una vela está cerrada si: timestamp + timeframe_ms <= current_time_ms.
+    Si no hay ninguna, retorna None.
+    """
+    for idx in range(len(df)-1, -1, -1):
+        candle_time_ms = int(df.index[idx].timestamp() * 1000)
+        close_time_ms = candle_time_ms + timeframe_ms
+        if close_time_ms <= current_time_ms:
+            return idx  # índice posicional en el DataFrame
+    return None
 
 # Parámetros globales (desde .env)
 PARAMS = {
@@ -77,33 +109,66 @@ def delete_ticker(symbol):
     write_tickers(tickers)
 
 # --------------------- Lógica de monitoreo ---------------------
+# Diccionario para recordar la última vela cerrada que ya generó alerta (por símbolo)
+last_alerted_candle = {}  # key: symbol, value: timestamp (ms) de la vela cerrada
+
 def analyze_and_alert():
+    global last_alerted_candle
     tickers = read_tickers()
     active_tickers = [t for t in tickers if t['active'].lower() == 'true']
+    current_time_ms = get_exchange_time()
     
     for ticker in active_tickers:
         symbol = ticker['symbol']
         timeframe = ticker.get('timeframe', DEFAULT_TIMEFRAME)
+        timeframe_ms = timeframe_to_milliseconds(timeframe)
+        
         try:
             df = fetch_ohlcv(symbol, timeframe, limit=300)
-            df = detect_signals(df, PARAMS)
-            signal = get_last_signal(df)
-            if signal:
-                sig_type, row = signal
-                # Evitar alertas repetidas para el mismo símbolo y tipo en la misma vela
-                last_key = f"{symbol}_{sig_type}"
-                last_time = last_alert.get(last_key)
-                current_time = df.index[-1]
-                if last_time is None or current_time != last_time:
-                    precio = row['close']
-                    momento = "ALCISTA ↑" if row['hist'] > 0 else "BAJISTA ↓"
-                    tendencia = "BULL (Up)" if row['is_bullish'] else "BEAR (Down)"
-                    send_telegram_alert(symbol, sig_type, precio, momento, tendencia)
-                    last_alert[last_key] = current_time
-                    print(f"[{datetime.now()}] Alerta {sig_type} para {symbol} - Precio: {precio}")
+            if df.empty:
+                continue
+            
+            # Encontrar la última vela completamente cerrada
+            last_closed_idx = get_last_closed_candle(df, timeframe_ms, current_time_ms)
+            if last_closed_idx is None:
+                print(f"[{datetime.now()}] No hay velas cerradas para {symbol} aún")
+                continue
+            
+            # Obtener timestamp de esa vela cerrada (en ms)
+            last_closed_ts = int(df.index[last_closed_idx].timestamp() * 1000)
+            
+            # Si ya procesamos esta vela, saltar
+            if symbol in last_alerted_candle and last_alerted_candle[symbol] >= last_closed_ts:
+                continue
+            
+            # Extraer sub-DataFrame hasta la vela cerrada inclusive (necesario para detectar cruces)
+            df_subset = df.iloc[:last_closed_idx+1].copy()
+            df_subset = detect_signals(df_subset, PARAMS)
+            
+            # Obtener señal solo de la última fila (que es la vela cerrada)
+            last_row = df_subset.iloc[-1]
+            prev_row = df_subset.iloc[-2] if len(df_subset) > 1 else None
+            
+            buy_signal = last_row['buy_signal'] and (prev_row is None or not prev_row['buy_signal'])
+            sell_signal = last_row['sell_signal'] and (prev_row is None or not prev_row['sell_signal'])
+            
+            if buy_signal or sell_signal:
+                sig_type = 'BUY' if buy_signal else 'SELL'
+                precio = last_row['close']
+                momento = "ALCISTA ↑" if last_row['hist'] > 0 else "BAJISTA ↓"
+                tendencia = "BULL (Up)" if last_row['is_bullish'] else "BEAR (Down)"
+                
+                send_telegram_alert(symbol, sig_type, precio, momento, tendencia)
+                print(f"[{datetime.now()}] Alerta {sig_type} para {symbol} - Precio: {precio} (vela cerrada {last_closed_ts})")
+                
+                # Registrar que ya alertamos para esta vela
+                last_alerted_candle[symbol] = last_closed_ts
+            else:
+                # Aún así, marcamos la vela como procesada para no volver a evaluarla sin señal
+                last_alerted_candle[symbol] = last_closed_ts
+                
         except Exception as e:
             print(f"Error analizando {symbol}: {e}")
-
 # --------------------- Web (Flask) ---------------------
 app = Flask(__name__)
 
