@@ -188,8 +188,10 @@ def analyze_and_alert():
                 momento = "ALCISTA ↑" if last_row['hist'] > 0 else "BAJISTA ↓"
                 tendencia = "BULL (Up)" if last_row['is_bullish'] else "BEAR (Down)"
                 
-                send_telegram_alert(symbol, sig_type, precio, momento, tendencia)
+                sent = send_telegram_alert(symbol, sig_type, precio, momento, tendencia)
                 save_signal(symbol, sig_type, precio, momento, tendencia)
+                if not sent:
+                    log_message(f"ERROR: fallo al enviar Telegram para {symbol} - Precio: {precio} (vela UTC {last_closed_ts})")
                 log_message(f"Alerta {sig_type} para {symbol} - Precio: {precio} (vela UTC {last_closed_ts})")
                 last_alerted_candle[symbol] = last_closed_ts
             else:
